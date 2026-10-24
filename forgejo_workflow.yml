@@ -15,7 +15,11 @@ jobs:
       - name: Check the proposal
         env:
           TOKEN: ${{ github.token }}
+          # the comment comes from n1oc: a disroot account whose token (write:issue only) is the
+          # N1OC_TOKEN secret; without it, from Forgejo's own bot
+          N1OC_TOKEN: ${{ secrets.N1OC_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
+          RUN: ${{ github.run_number }}
           SERVER: ${{ github.server_url }}
           REPO: ${{ github.repository }}
         run: |
@@ -35,4 +39,22 @@ jobs:
           cd repo
           # the job's own token, read-only: also a private repository can be fetched
           git -c http.extraHeader="Authorization: token $TOKEN" fetch -q "$SERVER/$REPO" "+refs/heads/master:refs/base" "+refs/pull/$PR/head:refs/pr"
-          BASE=refs/base HEAD=refs/pr DESCRIPTION=../description.md FRONTMATTER_AWK=../frontmatter.awk bash ../pre_parser.sh
+          rc=0
+          BASE=refs/base HEAD=refs/pr DESCRIPTION=../description.md FRONTMATTER_AWK=../frontmatter.awk bash ../pre_parser.sh \
+              2>&1 | tee ../out.txt || rc=$?
+          # The result as one comment on the pull request, edited on each run (Forgejo shows no
+          # annotations). The proposal's text can be in it: inside a code block, without backticks,
+          # so it can't add links or mention anyone.
+          result=$(sed 's/\x1b\[[0-9;]*m//g' ../out.txt | grep -E '^(Error|Warning): ' | tr -d '`' || true)
+          if ((rc)); then head="❌ The proposal check failed"; else head="✅ The proposal check passed"; fi
+          body=$(printf '<!-- pre-parser -->\n%s.\n\n```\n%s\n```\n\n[The check'"'"'s log](%s/%s/actions/runs/%s)\n' \
+              "$head" "${result:-No problems.}" "$SERVER" "$REPO" "$RUN" | jq -Rs '{body: .}')
+          api="$SERVER/api/v1/repos/$REPO"
+          auth="Authorization: token ${N1OC_TOKEN:-$TOKEN}"
+          id=$(curl -fsS -H "$auth" "$api/issues/$PR/comments" | jq -r '[.[] | select(.body | startswith("<!-- pre-parser -->"))][0].id // empty') || id=
+          if [[ -n $id ]]; then
+              curl -fsS -o /dev/null -X PATCH -H "$auth" -H 'Content-Type: application/json' -d "$body" "$api/issues/comments/$id" || echo "(could not update the comment)"
+          else
+              curl -fsS -o /dev/null -X POST -H "$auth" -H 'Content-Type: application/json' -d "$body" "$api/issues/$PR/comments" || echo "(could not comment)"
+          fi
+          exit "$rc"
