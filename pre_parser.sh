@@ -12,17 +12,19 @@
 # Run in a clone of ccs-proposals that has both commits. It runs nothing from the pull request:
 # the proposal is only read, with git show. Needs bash, git, awk, sed, date (GNU).
 #
-# Output: a problem is one ::error:: line (a CRLF file a ::warning::), in plain words with what
-# to do, and the last line of the log; the details (the YAML, the values read) are in ::group::
-# sections, folded in the Actions UI.
+# Output, for Forgejo's log view (web_src/js/components/ActionJobStep.vue, v17): it has no
+# annotations and shows ::error:: and ::group:: as they are, but folds ##[group] ... ##[endgroup]
+# and draws ANSI colours. So a problem is one red "Error: ..." line, in plain words with what to
+# do, and the last line of the log (a CRLF file a yellow "Warning: ..." line); the details (the
+# files, the YAML, the values read) are folded groups above it.
 set -euo pipefail
 : "${BASE:?}" "${HEAD:?}" "${DESCRIPTION:?}" "${FRONTMATTER_AWK:?}"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-fail() { echo "::error::$*"; exit 1; }
-group() { echo "::group::$*"; }
-endgroup() { echo "::endgroup::"; }
+fail() { printf '\033[1;31mError: %s\033[0m\n' "$*"; exit 1; }
+group() { echo "##[group]$*"; }
+endgroup() { echo "##[endgroup]"; }
 
 # pre_parser_1.sh: lines between --- lines dropped, then empty lines, runs of spaces made one
 strip_yaml_front_matter_and_preprocess() {
@@ -55,7 +57,7 @@ NEW_FILE=$(head -n 1 <<<"$NEW_FILES")
 
 git show "$HEAD:$NEW_FILE" > "$tmp/file"   # the proposal, as text: nothing of it is run
 grep -q $'\r' "$tmp/file" \
-    && echo "::warning::$NEW_FILE has Windows line endings (CRLF). It is still read, but please save it with Unix ones (LF)."
+    && printf '\033[1;33mWarning: %s\033[0m\n' "$NEW_FILE has Windows line endings (CRLF). It is still read, but please save it with Unix ones (LF)."
 sed 's/\r$//' "$tmp/file" > "$tmp/unix"
 
 has_yaml_front_matter "$tmp/unix" \
