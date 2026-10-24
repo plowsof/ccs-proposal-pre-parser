@@ -40,7 +40,7 @@ jobs:
           # the job's own token, read-only: also a private repository can be fetched
           git -c http.extraHeader="Authorization: token $TOKEN" fetch -q "$SERVER/$REPO" "+refs/heads/master:refs/base" "+refs/pull/$PR/head:refs/pr"
           rc=0
-          BASE=refs/base HEAD=refs/pr DESCRIPTION=../description.md FRONTMATTER_AWK=../frontmatter.awk FORGE=$SERVER DIFF_FILE=../diff.txt bash ../pre_parser.sh \
+          BASE=refs/base HEAD=refs/pr DESCRIPTION=../description.md FRONTMATTER_AWK=../frontmatter.awk DIFF_FILE=../diff.txt bash ../pre_parser.sh \
               2>&1 | tee ../out.txt || rc=$?
           # The result as one comment on the pull request, edited on each run (Forgejo shows no
           # annotations). The proposal's text can be in it: inside a code block, without backticks,
