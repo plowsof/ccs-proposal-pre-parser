@@ -40,15 +40,21 @@ jobs:
           # the job's own token, read-only: also a private repository can be fetched
           git -c http.extraHeader="Authorization: token $TOKEN" fetch -q "$SERVER/$REPO" "+refs/heads/master:refs/base" "+refs/pull/$PR/head:refs/pr"
           rc=0
-          BASE=refs/base HEAD=refs/pr DESCRIPTION=../description.md FRONTMATTER_AWK=../frontmatter.awk FORGE=$SERVER bash ../pre_parser.sh \
+          BASE=refs/base HEAD=refs/pr DESCRIPTION=../description.md FRONTMATTER_AWK=../frontmatter.awk FORGE=$SERVER DIFF_FILE=../diff.txt bash ../pre_parser.sh \
               2>&1 | tee ../out.txt || rc=$?
           # The result as one comment on the pull request, edited on each run (Forgejo shows no
           # annotations). The proposal's text can be in it: inside a code block, without backticks,
           # so it can't add links or mention anyone.
           result=$(sed 's/\x1b\[[0-9;]*m//g' ../out.txt | grep -E '^(Error|Warning): ' | tr -d '`' || true)
           if ((rc)); then head="❌ The proposal check failed"; else head="✅ The proposal check passed"; fi
-          body=$(printf '<!-- pre-parser -->\n%s.\n\n```\n%s\n```\n\n[The check'"'"'s log](%s/%s/actions/runs/%s)\n' \
-              "$head" "${result:-No problems.}" "$SERVER" "$REPO" "$RUN" | jq -Rs '{body: .}')
+          # the description's differences from the file: its lines -, the file's +, at most 40 lines
+          diff=""
+          if [[ -s ../diff.txt ]]; then
+              diff=$(tr -d '`' < ../diff.txt | awk 'NR <= 40; NR == 41 { print "... (more in the log)" }')
+              diff=$(printf '\nThe description (-) and the file (+), below the front matter:\n\n```diff\n%s\n```\n' "$diff")
+          fi
+          body=$(printf '<!-- pre-parser -->\n%s.\n\n```\n%s\n```\n%s\n[The check'"'"'s log](%s/%s/actions/runs/%s)\n' \
+              "$head" "${result:-No problems.}" "$diff" "$SERVER" "$REPO" "$RUN" | jq -Rs '{body: .}')
           api="$SERVER/api/v1/repos/$REPO"
           auth="Authorization: token ${N1OC_TOKEN:-$TOKEN}"
           id=$(curl -fsS -H "$auth" "$api/issues/$PR/comments" | jq -r '[.[] | select(.body | startswith("<!-- pre-parser -->"))][0].id // empty') || id=
