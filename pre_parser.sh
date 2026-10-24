@@ -37,7 +37,10 @@ has_yaml_front_matter() {
 
 #### pre_parser_1.sh
 
-strip_yaml_front_matter_and_preprocess < "$DESCRIPTION" > "$tmp/mr_description.md"
+# An image in the description may be a full link to the file on the pull request's branch (so it
+# shows there before the merge): .../images/<name>/<file> counts as the .md's images/<name>/<file>.
+sed -E 's#\]\(https://[^ )]*/(images/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)( [^)]*)?\)#](\1\2)#g' "$DESCRIPTION" \
+    | strip_yaml_front_matter_and_preprocess > "$tmp/mr_description.md"
 [[ $(tr -d '\n' < "$tmp/mr_description.md") ]] \
     || fail "The pull request's description is empty: paste the proposal's text into it (all of the file below its front matter)."
 
