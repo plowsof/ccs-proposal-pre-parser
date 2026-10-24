@@ -8,6 +8,7 @@
 #   BASE=<the target branch's commit> HEAD=<the pull request's commit> \
 #   DESCRIPTION=<a file with the pull request's description> FRONTMATTER_AWK=<frontmatter.awk> \
 #   [FORGE=<the forge, e.g. https://git.disroot.org>: images must be uploaded there] \
+#   [DIFF_FILE=<a file for the description's differences from the proposal, if any>] \
 #       ./pre_parser.sh
 #
 # Run in a clone of ccs-proposals that has both commits. It runs nothing from the pull request:
@@ -70,7 +71,12 @@ DIFF_OUTPUT=$(git --no-pager diff --no-index --color=always --word-diff=plain --
 if [[ -n $DIFF_OUTPUT ]]; then
     echo "The differences, the description's text in red and the file's in green:"
     printf '%s\n' "$DIFF_OUTPUT"
-    fail "The pull request's description isn't the same as the text of $NEW_FILE: copy the file's text below its front matter into the description (the differences are above)."
+    # DIFF_FILE: the same, line by line and without colours, for the comment on the pull request
+    if [[ -n ${DIFF_FILE:-} ]]; then
+        git --no-pager diff --no-index --no-color --ignore-space-change -U1 "$tmp/mr_description.md" "$tmp/file_content.md" \
+            | sed '1,/^+++ /d' > "$DIFF_FILE" || true
+    fi
+    fail "The pull request's description isn't the same as the text of $NEW_FILE: copy the file's text below its front matter into the description (the differences are shown with this error)."
 fi
 echo "The pull request's description is the text of $NEW_FILE."
 
