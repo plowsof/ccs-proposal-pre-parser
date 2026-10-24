@@ -7,7 +7,6 @@
 #
 #   BASE=<the target branch's commit> HEAD=<the pull request's commit> \
 #   DESCRIPTION=<a file with the pull request's description> FRONTMATTER_AWK=<frontmatter.awk> \
-#   [FORGE=<the forge, e.g. https://git.disroot.org>: images must be uploaded there] \
 #   [DIFF_FILE=<a file for the description's differences from the proposal, if any>] \
 #       ./pre_parser.sh
 #
@@ -38,7 +37,10 @@ has_yaml_front_matter() {
 
 #### pre_parser_1.sh
 
-strip_yaml_front_matter_and_preprocess < "$DESCRIPTION" > "$tmp/mr_description.md"
+# An image in the description may be a full link to the file on the pull request's branch (so it
+# shows there before the merge): .../images/<name>/<file> counts as the .md's images/<name>/<file>.
+sed -E 's#\]\(https://[^ )]*/(images/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)( [^)]*)?\)#](\1\2)#g' "$DESCRIPTION" \
+    | strip_yaml_front_matter_and_preprocess > "$tmp/mr_description.md"
 [[ $(tr -d '\n' < "$tmp/mr_description.md") ]] \
     || fail "The pull request's description is empty: paste the proposal's text into it (all of the file below its front matter)."
 
@@ -48,14 +50,31 @@ group "Files the pull request adds or changes"
 echo "$CHANGED_FILES"
 endgroup
 
+# A proposal is one new .md file, and the images it shows (if any): new too, in images/<its name>/
 FILE_COUNT=$(grep -c -v '^[[:space:]]*$' <<<"$CHANGED_FILES" || true)
-[[ $FILE_COUNT == 1 ]] \
-    || fail "The pull request changes $FILE_COUNT files: a proposal is one new .md file and nothing else."
-
-NEW_FILE=$(head -n 1 <<<"$NEW_FILES")
-[[ -n $NEW_FILE ]] \
+MDS=$(grep -E '\.md$' <<<"$CHANGED_FILES" || true)
+OTHERS=$(grep -vE '\.md$|^[[:space:]]*$' <<<"$CHANGED_FILES" || true)
+MD_COUNT=$(grep -c . <<<"$MDS" || true)
+((FILE_COUNT > 0)) || fail "The pull request changes no files: a proposal is one new .md file."
+if ((MD_COUNT != 1)); then
+    ((MD_COUNT == 0 && FILE_COUNT == 1)) && fail "$OTHERS is not a Markdown file: a proposal's name ends in .md."
+    fail "The pull request has $MD_COUNT .md files: a proposal is one new .md file (and the images it shows, in images/<its name>/)."
+fi
+NEW_FILE=$MDS
+grep -qxF -- "$NEW_FILE" <<<"$NEW_FILES" \
     || fail "The pull request adds no new file, it only edits one: a proposal is a new .md file (edits to existing proposals are made by the CCS maintainers)."
-[[ $NEW_FILE == *.md ]] || fail "$NEW_FILE is not a Markdown file: a proposal's name ends in .md."
+STEM=${NEW_FILE%.md}
+IMAGES=()
+while IFS= read -r f; do
+    [[ -n $f ]] || continue
+    grep -qxF -- "$f" <<<"$NEW_FILES" || fail "$f is an existing file, changed: a proposal pull request only adds its .md and its images."
+    [[ $STEM =~ ^[A-Za-z0-9._-]+$ ]] \
+        || fail "$f: a proposal with images needs a simple name (letters, digits, . _ -): rename $NEW_FILE."
+    [[ $f =~ ^images/$STEM/[A-Za-z0-9._-]+\.(png|jpg|jpeg|gif)$ ]] \
+        || fail "$f: besides its .md, a proposal can only add images, named like images/$STEM/chart.png (letters, digits, . _ -; .png, .jpg, .jpeg or .gif)."
+    IMAGES+=("$f")
+done <<<"$OTHERS"
+((${#IMAGES[@]} <= 10)) || fail "The pull request adds ${#IMAGES[@]} images: at most 10."
 
 git show "$HEAD:$NEW_FILE" > "$tmp/file"   # the proposal, as text: nothing of it is run
 grep -q $'\r' "$tmp/file" \
@@ -185,20 +204,27 @@ if [[ $title == *[\&\"\'\<\>]* ]]; then
     fail "title: '$title' has one of & \" ' < > in it: leave them out of the title."
 fi
 
-# Images: uploaded to this forge, as dragging one into the pull request does (FORGE, e.g.
-# https://git.disroot.org): the site shows only those, from its own copy; any other image would
-# only be a link. Raw <img> tags show as text on the site.
-if [[ -n ${FORGE:-} ]]; then
-    uuid='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-    while IFS= read -r a; do
-        [[ $a =~ ^(${FORGE//./\.})?(/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?/attachments/$uuid$ ]] \
-            || fail "The image $a isn't uploaded here: drag the picture into the pull request's description, then use the address it gets there (it has /attachments/ in it)."
-    done < <(awk 'FNR == 1 { fm = ($0 ~ /^---[ \t]*$/); next } fm { if ($0 ~ /^(---|\.\.\.)[ \t]*$/) fm = 0; next }
-        { s = $0; while (match(s, /!\[[^]]*\]\([^) ]+( [^)]*)?\)/)) { m = substr(s, RSTART, RLENGTH)
-          u = substr(m, index(m, "](") + 2); sub(/\)$/, "", u); sub(/ .*/, "", u); print u; s = substr(s, RSTART + RLENGTH) } }' "$tmp/nocr")
-    grep -qiE '<img[ >]' "$tmp/nocr" \
-        && fail "An <img> tag: the site shows it as text. Drag the picture into the pull request's description and use the ![description](address) it gives."
-fi
+# Its images: real PNG, JPEG or GIF files (their first bytes, not the name), 2 MB at most, each one
+# shown in the .md as ![...](images/<name>/<file>), and every such image in the pull request
+REFS=$(awk 'FNR == 1 { fm = ($0 ~ /^---[ \t]*$/); next } fm { if ($0 ~ /^(---|\.\.\.)[ \t]*$/) fm = 0; next }
+    { s = $0; while (match(s, /!\[[^]]*\]\([^) ]+( [^)]*)?\)/)) { m = substr(s, RSTART, RLENGTH)
+      u = substr(m, index(m, "](") + 2); sub(/\)$/, "", u); sub(/ .*/, "", u); print u; s = substr(s, RSTART + RLENGTH) } }' "$tmp/nocr")
+for f in "${IMAGES[@]}"; do
+    git show "$HEAD:$f" > "$tmp/image"
+    (($(wc -c < "$tmp/image") <= 2097152)) || fail "$f is over 2 MB: make it smaller."
+    m=''; LC_ALL=C read -r -N 8 m < "$tmp/image" || true
+    case $m in
+        $'\x89PNG\r\n\x1a\n' | $'\xff\xd8\xff'* | GIF87a* | GIF89a*) ;;
+        *) fail "$f is not a PNG, JPEG or GIF image (by its contents, whatever its name)." ;;
+    esac
+    grep -qxF -- "$f" <<<"$REFS" \
+        || fail "$f is in the pull request but not shown in $NEW_FILE: add ![description]($f) where it goes, or remove the image."
+done
+while IFS= read -r r; do
+    [[ $r == images/* ]] || continue
+    printf '%s\n' "${IMAGES[@]}" | grep -qxF -- "$r" \
+        || fail "$NEW_FILE shows $r, which isn't in the pull request: add the image (with Upload file, to images/$STEM/) or fix the name."
+done <<<"$REFS"
 
 amt=${amount_raw//,/.}; [[ $amt =~ ^[[:space:]]*[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+) ]] && amt=${BASH_REMATCH[0]// /} || amt=0
 group "The proposal as the site will read it"
