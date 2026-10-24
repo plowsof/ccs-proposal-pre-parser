@@ -1,0 +1,36 @@
+# The GitLab job's proposal checks (gitlab_workflow.yml), on Forgejo, without PHP: pre_parser.sh,
+# both stages in bash, the YAML read by ccs-bash's own parser. Goes in ccs-proposals as
+# .forgejo/workflows/pre-parser.yml.
+#
+# pull_request_target: this file and both scripts come from master, never from the pull request,
+# whose proposal is only read (git show). The runner runs jobs on its host.
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  pre_parser:
+    runs-on: docker
+    steps:
+      - name: Check the proposal
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          cd "$work"
+          # pinned, as gitlab_workflow.yml pins its two, and checked
+          curl -fsSL -o pre_parser.sh https://raw.githubusercontent.com/plowsof/ccs-proposal-pre-parser/182cdfd973d01c7ff0e81410aa97a7fe1e77fad3/pre_parser.sh
+          curl -fsSL -o frontmatter.awk https://raw.githubusercontent.com/plowsof/ccs-bash/6fbc5fbd7b59e897caad8a2e9cef2a034cb851d2/lib/frontmatter.awk
+          sha256sum -c <<'SUMS'
+          20e0f2a6c08e643e3464edaff469a23fa585953ca50523ff002da3c0b2efd632  pre_parser.sh
+          c19fff18ce6f5ec18ee9e8a18afbda8beb943e9724fccda02f823ddfa5bf224b  frontmatter.awk
+          SUMS
+          jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > description.md
+          git init -q repo
+          cd repo
+          git fetch -q "$SERVER/$REPO" "+refs/heads/master:refs/base" "+refs/pull/$PR/head:refs/pr"
+          BASE=refs/base HEAD=refs/pr DESCRIPTION=../description.md FRONTMATTER_AWK=../frontmatter.awk bash ../pre_parser.sh
