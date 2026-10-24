@@ -28,10 +28,10 @@ jobs:
           trap 'rm -rf "$work"' EXIT
           cd "$work"
           # pinned, as gitlab_workflow.yml pins its two, and checked
-          curl -fsSL -o pre_parser.sh https://raw.githubusercontent.com/plowsof/ccs-proposal-pre-parser/94d8b6674b9f2dd5c5f8b0a2bf6b8fcae52ebb0b/pre_parser.sh
+          curl -fsSL -o pre_parser.sh https://raw.githubusercontent.com/plowsof/ccs-proposal-pre-parser/d84cc28b5a6984a07e51fe0523a7452488631816/pre_parser.sh
           curl -fsSL -o frontmatter.awk https://raw.githubusercontent.com/plowsof/ccs-bash/6fbc5fbd7b59e897caad8a2e9cef2a034cb851d2/lib/frontmatter.awk
           sha256sum -c <<'SUMS'
-          f272187dac443ee4b20302a4f9f697817ab0aefc217a429c4bc9acd1a9a3a9c2  pre_parser.sh
+          eed1d5f1ba64968e0e369965de74aae81092cf60753f49fe16d8d08f1a395e80  pre_parser.sh
           c19fff18ce6f5ec18ee9e8a18afbda8beb943e9724fccda02f823ddfa5bf224b  frontmatter.awk
           SUMS
           jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > description.md
