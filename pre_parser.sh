@@ -7,6 +7,7 @@
 #
 #   BASE=<the target branch's commit> HEAD=<the pull request's commit> \
 #   DESCRIPTION=<a file with the pull request's description> FRONTMATTER_AWK=<frontmatter.awk> \
+#   [FORGE=<the forge, e.g. https://git.disroot.org>: images must be uploaded there] \
 #       ./pre_parser.sh
 #
 # Run in a clone of ccs-proposals that has both commits. It runs nothing from the pull request:
@@ -176,6 +177,21 @@ fi
 # htmlspecialchars(title, ENT_QUOTES) must change nothing
 if [[ $title == *[\&\"\'\<\>]* ]]; then
     fail "title: '$title' has one of & \" ' < > in it: leave them out of the title."
+fi
+
+# Images: uploaded to this forge, as dragging one into the pull request does (FORGE, e.g.
+# https://git.disroot.org): the site shows only those, from its own copy; any other image would
+# only be a link. Raw <img> tags show as text on the site.
+if [[ -n ${FORGE:-} ]]; then
+    uuid='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    while IFS= read -r a; do
+        [[ $a =~ ^(${FORGE//./\.})?(/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?/attachments/$uuid$ ]] \
+            || fail "The image $a isn't uploaded here: drag the picture into the pull request's description, then use the address it gets there (it has /attachments/ in it)."
+    done < <(awk 'FNR == 1 { fm = ($0 ~ /^---[ \t]*$/); next } fm { if ($0 ~ /^(---|\.\.\.)[ \t]*$/) fm = 0; next }
+        { s = $0; while (match(s, /!\[[^]]*\]\([^) ]+( [^)]*)?\)/)) { m = substr(s, RSTART, RLENGTH)
+          u = substr(m, index(m, "](") + 2); sub(/\)$/, "", u); sub(/ .*/, "", u); print u; s = substr(s, RSTART + RLENGTH) } }' "$tmp/nocr")
+    grep -qiE '<img[ >]' "$tmp/nocr" \
+        && fail "An <img> tag: the site shows it as text. Drag the picture into the pull request's description and use the ![description](address) it gives."
 fi
 
 amt=${amount_raw//,/.}; [[ $amt =~ ^[[:space:]]*[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+) ]] && amt=${BASH_REMATCH[0]// /} || amt=0
