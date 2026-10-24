@@ -47,14 +47,31 @@ group "Files the pull request adds or changes"
 echo "$CHANGED_FILES"
 endgroup
 
+# A proposal is one new .md file, and the images it shows (if any): new too, in images/<its name>/
 FILE_COUNT=$(grep -c -v '^[[:space:]]*$' <<<"$CHANGED_FILES" || true)
-[[ $FILE_COUNT == 1 ]] \
-    || fail "The pull request changes $FILE_COUNT files: a proposal is one new .md file and nothing else."
-
-NEW_FILE=$(head -n 1 <<<"$NEW_FILES")
-[[ -n $NEW_FILE ]] \
+MDS=$(grep -E '\.md$' <<<"$CHANGED_FILES" || true)
+OTHERS=$(grep -vE '\.md$|^[[:space:]]*$' <<<"$CHANGED_FILES" || true)
+MD_COUNT=$(grep -c . <<<"$MDS" || true)
+((FILE_COUNT > 0)) || fail "The pull request changes no files: a proposal is one new .md file."
+if ((MD_COUNT != 1)); then
+    ((MD_COUNT == 0 && FILE_COUNT == 1)) && fail "$OTHERS is not a Markdown file: a proposal's name ends in .md."
+    fail "The pull request has $MD_COUNT .md files: a proposal is one new .md file (and the images it shows, in images/<its name>/)."
+fi
+NEW_FILE=$MDS
+grep -qxF -- "$NEW_FILE" <<<"$NEW_FILES" \
     || fail "The pull request adds no new file, it only edits one: a proposal is a new .md file (edits to existing proposals are made by the CCS maintainers)."
-[[ $NEW_FILE == *.md ]] || fail "$NEW_FILE is not a Markdown file: a proposal's name ends in .md."
+STEM=${NEW_FILE%.md}
+IMAGES=()
+while IFS= read -r f; do
+    [[ -n $f ]] || continue
+    grep -qxF -- "$f" <<<"$NEW_FILES" || fail "$f is an existing file, changed: a proposal pull request only adds its .md and its images."
+    [[ $STEM =~ ^[A-Za-z0-9._-]+$ ]] \
+        || fail "$f: a proposal with images needs a simple name (letters, digits, . _ -): rename $NEW_FILE."
+    [[ $f =~ ^images/$STEM/[A-Za-z0-9._-]+\.(png|jpg|jpeg|gif)$ ]] \
+        || fail "$f: besides its .md, a proposal can only add images, named like images/$STEM/chart.png (letters, digits, . _ -; .png, .jpg, .jpeg or .gif)."
+    IMAGES+=("$f")
+done <<<"$OTHERS"
+((${#IMAGES[@]} <= 10)) || fail "The pull request adds ${#IMAGES[@]} images: at most 10."
 
 git show "$HEAD:$NEW_FILE" > "$tmp/file"   # the proposal, as text: nothing of it is run
 grep -q $'\r' "$tmp/file" \
@@ -183,6 +200,28 @@ fi
 if [[ $title == *[\&\"\'\<\>]* ]]; then
     fail "title: '$title' has one of & \" ' < > in it: leave them out of the title."
 fi
+
+# Its images: real PNG, JPEG or GIF files (their first bytes, not the name), 2 MB at most, each one
+# shown in the .md as ![...](images/<name>/<file>), and every such image in the pull request
+REFS=$(awk 'FNR == 1 { fm = ($0 ~ /^---[ \t]*$/); next } fm { if ($0 ~ /^(---|\.\.\.)[ \t]*$/) fm = 0; next }
+    { s = $0; while (match(s, /!\[[^]]*\]\([^) ]+( [^)]*)?\)/)) { m = substr(s, RSTART, RLENGTH)
+      u = substr(m, index(m, "](") + 2); sub(/\)$/, "", u); sub(/ .*/, "", u); print u; s = substr(s, RSTART + RLENGTH) } }' "$tmp/nocr")
+for f in "${IMAGES[@]}"; do
+    git show "$HEAD:$f" > "$tmp/image"
+    (($(wc -c < "$tmp/image") <= 2097152)) || fail "$f is over 2 MB: make it smaller."
+    m=''; LC_ALL=C read -r -N 8 m < "$tmp/image" || true
+    case $m in
+        $'\x89PNG\r\n\x1a\n' | $'\xff\xd8\xff'* | GIF87a* | GIF89a*) ;;
+        *) fail "$f is not a PNG, JPEG or GIF image (by its contents, whatever its name)." ;;
+    esac
+    grep -qxF -- "$f" <<<"$REFS" \
+        || fail "$f is in the pull request but not shown in $NEW_FILE: add ![description]($f) where it goes, or remove the image."
+done
+while IFS= read -r r; do
+    [[ $r == images/* ]] || continue
+    printf '%s\n' "${IMAGES[@]}" | grep -qxF -- "$r" \
+        || fail "$NEW_FILE shows $r, which isn't in the pull request: add the image (with Upload file, to images/$STEM/) or fix the name."
+done <<<"$REFS"
 
 amt=${amount_raw//,/.}; [[ $amt =~ ^[[:space:]]*[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+) ]] && amt=${BASH_REMATCH[0]// /} || amt=0
 group "The proposal as the site will read it"
