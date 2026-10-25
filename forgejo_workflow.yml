@@ -4,9 +4,13 @@
 #
 # pull_request_target: this file and both scripts come from master, never from the pull request,
 # whose proposal is only read (git show). The runner runs jobs on its host.
+#
+# Once merged, the same comment becomes a link to the proposal on master (and to edit it there):
+# the file the maintainers later change (milestones, payouts) keeps its name, so the link always
+# opens its newest version.
 on:
   pull_request_target:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened, closed]
 
 jobs:
   pre_parser:
@@ -24,6 +28,31 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          api="$SERVER/api/v1/repos/$REPO"
+          auth="Authorization: token ${N1OC_TOKEN:-$TOKEN}"
+          # comment BODY: the one comment on the pull request, edited in place
+          comment() {
+              local body id
+              body=$(printf '<!-- pre-parser -->\n%s' "$1" | jq -Rs '{body: .}')
+              id=$(curl -fsS -H "$auth" "$api/issues/$PR/comments" | jq -r '[.[] | select(.body | startswith("<!-- pre-parser -->"))][0].id // empty') || id=
+              if [[ -n $id ]]; then
+                  curl -fsS -o /dev/null -X PATCH -H "$auth" -H 'Content-Type: application/json' -d "$body" "$api/issues/comments/$id" || echo "(could not update the comment)"
+              else
+                  curl -fsS -o /dev/null -X POST -H "$auth" -H 'Content-Type: application/json' -d "$body" "$api/issues/$PR/comments" || echo "(could not comment)"
+              fi
+          }
+          # closed: if merged, the proposal on master; not merged, nothing
+          if [[ $(jq -r '.action' "$GITHUB_EVENT_PATH") == closed ]]; then
+              [[ $(jq -r '.pull_request.merged' "$GITHUB_EVENT_PATH") == true ]] || exit 0
+              branch=$(jq -r '.pull_request.base.ref' "$GITHUB_EVENT_PATH")
+              file=$(curl -fsS -H "Authorization: token $TOKEN" "$api/pulls/$PR/files" \
+                  | jq -r '[.[] | select(.status == "added") | .filename | select(test("^[^/]+\\.md$"))][0] // empty')
+              [[ -n $file ]] || exit 0
+              path=$(jq -rn --arg f "$file" '$f | @uri')
+              comment "$(printf '✅ Merged. The proposal on %s: [%s](%s/%s/src/branch/%s/%s) · [edit it](%s/%s/_edit/%s/%s)\n\nThat link always opens its newest version: later changes (milestones, payouts) are made to this file.\n' \
+                  "$branch" "$(tr -d '[]`' <<<"$file")" "$SERVER" "$REPO" "$branch" "$path" "$SERVER" "$REPO" "$branch" "$path")"
+              exit 0
+          fi
           work=$(mktemp -d)
           trap 'rm -rf "$work"' EXIT
           cd "$work"
@@ -53,14 +82,6 @@ jobs:
               diff=$(tr -d '`' < ../diff.txt | awk 'NR <= 40; NR == 41 { print "... (more in the log)" }')
               diff=$(printf '\nThe description (-) and the file (+), below the front matter:\n\n```diff\n%s\n```\n' "$diff")
           fi
-          body=$(printf '<!-- pre-parser -->\n%s.\n\n```\n%s\n```\n%s\n[The check'"'"'s log](%s/%s/actions/runs/%s)\n' \
-              "$head" "${result:-No problems.}" "$diff" "$SERVER" "$REPO" "$RUN" | jq -Rs '{body: .}')
-          api="$SERVER/api/v1/repos/$REPO"
-          auth="Authorization: token ${N1OC_TOKEN:-$TOKEN}"
-          id=$(curl -fsS -H "$auth" "$api/issues/$PR/comments" | jq -r '[.[] | select(.body | startswith("<!-- pre-parser -->"))][0].id // empty') || id=
-          if [[ -n $id ]]; then
-              curl -fsS -o /dev/null -X PATCH -H "$auth" -H 'Content-Type: application/json' -d "$body" "$api/issues/comments/$id" || echo "(could not update the comment)"
-          else
-              curl -fsS -o /dev/null -X POST -H "$auth" -H 'Content-Type: application/json' -d "$body" "$api/issues/$PR/comments" || echo "(could not comment)"
-          fi
+          comment "$(printf '%s.\n\n```\n%s\n```\n%s\n[The check'"'"'s log](%s/%s/actions/runs/%s)\n' \
+              "$head" "${result:-No problems.}" "$diff" "$SERVER" "$REPO" "$RUN")"
           exit "$rc"
