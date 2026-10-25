@@ -11,7 +11,8 @@
 #       ./pre_parser.sh
 #
 # Run in a clone of ccs-proposals that has both commits. It runs nothing from the pull request:
-# the proposal is only read, with git show. Needs bash, git, awk, sed, date (GNU).
+# the proposal is only read, with git show. Needs bash, git, awk, sed, grep and coreutils (GNU date,
+# od, head, tail, tr, wc). The Forgejo workflow also needs curl, jq and sha256sum.
 #
 # Output, for Forgejo's log view (web_src/js/components/ActionJobStep.vue, v17): it has no
 # annotations and shows ::error:: and ::group:: as they are, but folds ##[group] ... ##[endgroup]
