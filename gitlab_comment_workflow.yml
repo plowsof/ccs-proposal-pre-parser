@@ -1,10 +1,11 @@
 # forgejo_workflow.yml on GitLab: pre_parser.sh (both stages in bash, the YAML read by ccs-bash's
-# own parser), its result one comment on the merge request, edited in place on each run; once
-# merged, the comment links the proposal on its branch, and its editor, and shows what people
-# ask of a proposal: its stage (Funding Required, Work in Progress, Completed), its payouts and
-# what remains of its amount, as the site reads them (ccs-bash's frontmatter.awk, ccs-front-bash's
-# markdown.awk), updated each time the file changes there (a payout, a stage). (gitlab_workflow.yml
-# is the job ccs-proposals on repo.getmonero.org runs: the two originals, no comment.)
+# own parser), its result one comment on the merge request (n1oc's: the token's name), edited in
+# place on each run: passed, or the errors. Once merged, the comment links the proposal on its
+# branch, and its editor; from Work in Progress on, it also shows what people ask of a proposal:
+# its stage, its payouts and what remains of its amount, and its tags, as the site reads them
+# (ccs-bash's frontmatter.awk, ccs-front-bash's markdown.awk), updated each time the file changes
+# there (a payout, Completed, a tag). (gitlab_workflow.yml is the job ccs-proposals on
+# repo.getmonero.org runs: the two originals, no comment.)
 #
 # Set as the project's CI/CD configuration file (Settings > CI/CD > General pipelines; the API's
 # ci_config_path), by its raw URL at a commit:
@@ -54,15 +55,16 @@ variables:
           curl -fsS -o /dev/null -X POST "${auth[@]}" -H 'Content-Type: application/json' -d "$body" "$api/merge_requests/$1/notes" || echo "(could not comment)"
       fi
   }
-  # summary REV FILE: the proposal FILE at REV as the site reads it: its stage, its payouts and
-  # what remains of its amount. In a code block, without backticks, entities as text: a
-  # proposal's words can't add links or mention anyone. Nothing if it doesn't read.
+  # summary REV FILE: the proposal FILE at REV as the site reads it, once in Work in Progress or
+  # Completed: its stage, its payouts and what remains of its amount, its tags. In a code block,
+  # without backticks, entities as text: a proposal's words can't add links or mention anyone.
+  # Nothing if it doesn't read, or is still funding required.
   summary() {
       local d line stages
       d=$(mktemp -d)
       git show "$1:$2" > "$d/$2" 2> /dev/null || return 0
       line=$(cd "$d" && LC_ALL=C awk -f "$tools/frontmatter.awk" "$2" 2> /dev/null) || line=
-      [[ -n $line ]] || return 0
+      [[ -n $line && $(cut -f2 <<<"$line") != fr ]] || return 0
       stages='{"fr": "Funding Required", "wip": "Work in Progress", "cp": "Completed"}'
       (cd "$d" && LC_ALL=C awk -f "$tools/markdown.awk" "$2") | jq -r --arg l "$line" --argjson s "$stages" '
           def text: gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("&quot;"; "\"") | gsub("&#39;|&apos;"; "\u0027") | gsub("&amp;"; "&") | gsub("`"; "");
@@ -74,7 +76,8 @@ variables:
           | ([$p[] | .[1] | xmr] | add // 0) as $paid
           | "\($s[$f[1]] // $f[1]): \($amount | fmt) XMR, \($paid | fmt) paid out, \(([$amount - $paid, 0] | max) | fmt) remaining", "",
             "Payouts:",
-            (if ($p | length) == 0 then "  (none yet)" else $p[] | "  \(.[0] | text) · \(.[1] | text) XMR" end)' \
+            (if ($p | length) == 0 then "  (none yet)" else $p[] | "  \(.[0] | text) · \(.[1] | text) XMR" end),
+            ($f[9] // "" | split("\u001f") | map(select(. != "") | text) | if length > 0 then "", "Tags: \(join(", "))" else empty end)' \
           | { printf '\n```\n'; cat; printf '```\n'; }
       rm -rf "$d"
   }
@@ -108,7 +111,11 @@ pre_parser:
           diff=$(tr -d '`' < ../diff.txt | awk 'NR <= 40; NR == 41 { print "... (more in the log)" }')
           diff=$(printf '\nThe description (-) and the file (+), below the front matter:\n\n```diff\n%s\n```\n' "$diff")
       fi
-      comment "$MR" "$(printf '%s.\n\n```\n%s\n```\n%s\n[The check'"'"'s log](%s)\n' "$head" "${result:-No problems.}" "$diff" "$CI_JOB_URL")"
+      if ((rc)); then
+          comment "$MR" "$(printf '%s.\n\n```\n%s\n```\n%s\n[The check'"'"'s log](%s)\n' "$head" "${result:-See the log.}" "$diff" "$CI_JOB_URL")"
+      else
+          comment "$MR" "$head."
+      fi
       exit "$rc"
 
 # A push to a protected branch (a merge, a maintainer's edit: a payout, a stage): for each
@@ -164,6 +171,8 @@ proposal:
       while IFS=$'\t' read -r MR file; do
           path=$(jq -rn --arg f "$file" '$f | @uri')
           echo "$file: !$MR"
-          comment "$MR" "$(printf '✅ Merged. The proposal on %s: [%s](%s/-/blob/%s/%s) · [edit it](%s/-/edit/%s/%s)\n\nThat link always opens its newest version: later changes (payouts, its stage) are made to this file. As of %s:\n%s' \
-              "$branch" "$(tr -d '[]`' <<<"$file")" "$CI_PROJECT_URL" "$branch" "$path" "$CI_PROJECT_URL" "$branch" "$path" "${CI_COMMIT_SHA:0:8}" "$(summary "$CI_COMMIT_SHA" "$file")")"
+          sum=$(summary "$CI_COMMIT_SHA" "$file")
+          [[ -z $sum ]] || sum=$(printf '\n\nAs of %s:\n%s' "${CI_COMMIT_SHA:0:8}" "$sum")
+          comment "$MR" "$(printf '✅ Merged. The proposal on %s: [%s](%s/-/blob/%s/%s) · [edit it](%s/-/edit/%s/%s)%s' \
+              "$branch" "$(tr -d '[]`' <<<"$file")" "$CI_PROJECT_URL" "$branch" "$path" "$CI_PROJECT_URL" "$branch" "$path" "$sum")"
       done < ../pairs
