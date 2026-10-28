@@ -39,13 +39,15 @@ variables:
   c19fff18ce6f5ec18ee9e8a18afbda8beb943e9724fccda02f823ddfa5bf224b  frontmatter.awk
   2cae8f2d1fd66e787df2791ebab4b75e3386cf345e3dfc58ed109b38f15ecfb9  markdown.awk
   SUMS
-  # comment MR BODY: the one comment on merge request MR, edited in place
+  # comment MR BODY: the one comment on merge request MR, edited in place: its own (GitLab lets
+  # only its author edit a comment: after a new token, a new one, and PRE_PARSER_REFRESH below)
   comment() {
-      local body id
+      local body id me
       if [[ -z ${PRE_PARSER_TOKEN:-} ]]; then echo "(no PRE_PARSER_TOKEN: no comment)"; return 0; fi
       body=$(printf '<!-- pre-parser -->\n%s' "$2" | jq -Rs '{body: .}')
+      me=$(curl -fsS "${auth[@]}" "$CI_API_V4_URL/user" | jq -r '.id') || me=0
       id=$(curl -fsS "${auth[@]}" "$api/merge_requests/$1/notes?per_page=100&sort=asc" \
-          | jq -r '[.[] | select(.body | startswith("<!-- pre-parser -->"))][0].id // empty') || id=
+          | jq -r --argjson me "${me:-0}" '[.[] | select(.author.id == $me and (.body | startswith("<!-- pre-parser -->")))][0].id // empty') || id=
       if [[ -n $id ]]; then
           curl -fsS -o /dev/null -X PUT "${auth[@]}" -H 'Content-Type: application/json' -d "$body" "$api/merge_requests/$1/notes/$id" || echo "(could not update the comment)"
       else
@@ -114,29 +116,54 @@ pre_parser:
 # proposal on that branch and to edit it there, its stage, payouts and what remains, as they are
 # now. The file the maintainers later change keeps its name, so the link always opens its newest
 # version. At most 20 proposals a push (a branch pushed whole changes none: no earlier commit).
+#
+# PRE_PARSER_REFRESH=1, a pipeline run by hand on such a branch (Build > Pipelines > Run
+# pipeline, that variable; or the API): every merge request merged into it gets its comment
+# afresh, as of the branch now: after a new token (the comments of the one before are no longer
+# its own; delete them first, as a maintainer), or a change to this file.
 proposal:
   image: debian@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
   rules:
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"
+    - if: $CI_PIPELINE_SOURCE =~ /^(web|api)$/ && $PRE_PARSER_REFRESH && $CI_COMMIT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"
   script:
     - *setup
     - |
       branch=$CI_COMMIT_BRANCH
-      [[ ! $CI_COMMIT_BEFORE_SHA =~ ^0+$ ]] || { echo "a new branch: no proposal changed"; exit 0; }
       repo=$(mktemp -d)/repo
       git init -q "$repo" && cd "$repo"
       git fetch -q "$CI_PROJECT_URL.git" "+refs/heads/$branch:refs/b"
-      git cat-file -e "$CI_COMMIT_BEFORE_SHA^{commit}" 2> /dev/null || { echo "the earlier commit is gone (a force push): nothing compared"; exit 0; }
-      git diff --diff-filter=AM --name-only "$CI_COMMIT_BEFORE_SHA" "$CI_COMMIT_SHA" | grep -E '^[^/]+\.md$' | head -n 20 > ../files || true
-      while IFS= read -r file; do
-          # the merge request that added it: the commit that first added the file, merged into this branch
-          added=$(git log --diff-filter=A --format=%H "$CI_COMMIT_SHA" -- "$file" | tail -n 1)
-          [[ -n $added ]] || continue
-          MR=$(curl -fsS "${auth[@]}" "$api/repository/commits/$added/merge_requests" \
-              | jq -r --arg b "$branch" '[.[] | select(.state == "merged" and .target_branch == $b)][0].iid // empty') || MR=
-          [[ -n $MR ]] || { echo "$file: added by no merge request into $branch"; continue; }
+      : > ../pairs
+      if [[ ${PRE_PARSER_REFRESH:-} ]]; then
+          # every merge request merged into this branch that added a proposal it still has
+          page=1
+          while :; do
+              batch=$(curl -fsS "${auth[@]}" "$api/merge_requests?state=merged&target_branch=$branch&per_page=100&page=$page")
+              for MR in $(jq -r '.[].iid' <<<"$batch"); do
+                  file=$(curl -fsS "${auth[@]}" "$api/merge_requests/$MR/diffs?per_page=100" \
+                      | jq -r '[.[] | select(.new_file) | .new_path | select(test("^[^/]+\\.md$"))][0] // empty') || file=
+                  [[ -n $file ]] && git cat-file -e "$CI_COMMIT_SHA:$file" 2> /dev/null && printf '%s\t%s\n' "$MR" "$file" >> ../pairs
+              done
+              [[ $(jq length <<<"$batch") == 100 ]] || break
+              page=$((page + 1))
+          done
+      else
+          [[ ! $CI_COMMIT_BEFORE_SHA =~ ^0+$ ]] || { echo "a new branch: no proposal changed"; exit 0; }
+          git cat-file -e "$CI_COMMIT_BEFORE_SHA^{commit}" 2> /dev/null || { echo "the earlier commit is gone (a force push): nothing compared"; exit 0; }
+          git diff --diff-filter=AM --name-only "$CI_COMMIT_BEFORE_SHA" "$CI_COMMIT_SHA" | grep -E '^[^/]+\.md$' | head -n 20 > ../files || true
+          while IFS= read -r file; do
+              # the merge request that added it: the commit that first added the file, merged into this branch
+              added=$(git log --diff-filter=A --format=%H "$CI_COMMIT_SHA" -- "$file" | tail -n 1)
+              [[ -n $added ]] || continue
+              MR=$(curl -fsS "${auth[@]}" "$api/repository/commits/$added/merge_requests" \
+                  | jq -r --arg b "$branch" '[.[] | select(.state == "merged" and .target_branch == $b)][0].iid // empty') || MR=
+              [[ -n $MR ]] || { echo "$file: added by no merge request into $branch"; continue; }
+              printf '%s\t%s\n' "$MR" "$file" >> ../pairs
+          done < ../files
+      fi
+      while IFS=$'\t' read -r MR file; do
           path=$(jq -rn --arg f "$file" '$f | @uri')
           echo "$file: !$MR"
           comment "$MR" "$(printf '✅ Merged. The proposal on %s: [%s](%s/-/blob/%s/%s) · [edit it](%s/-/edit/%s/%s)\n\nThat link always opens its newest version: later changes (payouts, its stage) are made to this file. As of %s:\n%s' \
               "$branch" "$(tr -d '[]`' <<<"$file")" "$CI_PROJECT_URL" "$branch" "$path" "$CI_PROJECT_URL" "$branch" "$path" "${CI_COMMIT_SHA:0:8}" "$(summary "$CI_COMMIT_SHA" "$file")")"
-      done < ../files
+      done < ../pairs
