@@ -1,0 +1,100 @@
+# forgejo_workflow.yml on GitLab: pre_parser.sh (both stages in bash, the YAML read by ccs-bash's
+# own parser), its result one comment on the merge request, edited in place on each run; once
+# merged, the comment links the proposal on its branch, and its editor. (gitlab_workflow.yml is
+# the job ccs-proposals on repo.getmonero.org runs: the two originals, no comment.)
+#
+# Set as the project's CI/CD configuration file (Settings > CI/CD > General pipelines; the API's
+# ci_config_path), by its raw URL at a commit:
+#   https://raw.githubusercontent.com/plowsof/ccs-proposal-pre-parser/<commit>/gitlab_comment_workflow.yml
+# This file and both scripts then come from here, never from the merge request, whose proposal
+# is only read (git show; GIT_STRATEGY none: its branch isn't even checked out).
+#
+# The comment needs a token that can comment on merge requests (an access token, scope api) in
+# the CI/CD variable PRE_PARSER_TOKEN, masked and not protected (merge request pipelines don't
+# get protected variables); without it the check still runs, its result only in the log.
+# A merge request from a fork: GitLab runs its pipeline in the fork, without the token, unless
+# the project runs them in itself (Premium). Merged: the target branch's pipeline (a push, the
+# merge commit) finds the merge request by that commit and comments, a fork's too.
+
+variables:
+  GIT_STRATEGY: none
+
+.setup: &setup |
+  set -euo pipefail
+  apt-get -qq update > /dev/null && apt-get -qq install -y --no-install-recommends ca-certificates curl git jq > /dev/null
+  api="$CI_API_V4_URL/projects/$CI_PROJECT_ID"
+  auth=()
+  [[ -z ${PRE_PARSER_TOKEN:-} ]] || auth=(-H "PRIVATE-TOKEN: $PRE_PARSER_TOKEN")
+  # comment MR BODY: the one comment on merge request MR, edited in place
+  comment() {
+      local body id
+      if [[ -z ${PRE_PARSER_TOKEN:-} ]]; then echo "(no PRE_PARSER_TOKEN: no comment)"; return 0; fi
+      body=$(printf '<!-- pre-parser -->\n%s' "$2" | jq -Rs '{body: .}')
+      id=$(curl -fsS "${auth[@]}" "$api/merge_requests/$1/notes?per_page=100&sort=asc" \
+          | jq -r '[.[] | select(.body | startswith("<!-- pre-parser -->"))][0].id // empty') || id=
+      if [[ -n $id ]]; then
+          curl -fsS -o /dev/null -X PUT "${auth[@]}" -H 'Content-Type: application/json' -d "$body" "$api/merge_requests/$1/notes/$id" || echo "(could not update the comment)"
+      else
+          curl -fsS -o /dev/null -X POST "${auth[@]}" -H 'Content-Type: application/json' -d "$body" "$api/merge_requests/$1/notes" || echo "(could not comment)"
+      fi
+  }
+
+pre_parser:
+  image: debian@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - *setup
+    - |
+      MR=$CI_MERGE_REQUEST_IID
+      work=$(mktemp -d)
+      cd "$work"
+      # pinned, as gitlab_workflow.yml pins its two, and checked
+      curl -fsSL -o pre_parser.sh https://raw.githubusercontent.com/plowsof/ccs-proposal-pre-parser/2264f45c045cb7616c6888fcd50c12181274227d/pre_parser.sh
+      curl -fsSL -o frontmatter.awk https://raw.githubusercontent.com/plowsof/ccs-bash/6fbc5fbd7b59e897caad8a2e9cef2a034cb851d2/lib/frontmatter.awk
+      sha256sum -c <<'SUMS'
+      8ea7c7aff91a7bd22c2a5f52ee2a9be8595aeb4c8435f5cb3cfbb0130d0623bc  pre_parser.sh
+      c19fff18ce6f5ec18ee9e8a18afbda8beb943e9724fccda02f823ddfa5bf224b  frontmatter.awk
+      SUMS
+      # the description in full (CI_MERGE_REQUEST_DESCRIPTION is cut at 2700 characters)
+      curl -fsS "${auth[@]}" "$api/merge_requests/$MR" | jq -r '.description // ""' > description.md
+      git init -q repo
+      cd repo
+      # the target branch, and the merge request's commit (a fork's too: GitLab keeps it here)
+      git fetch -q "$CI_PROJECT_URL.git" "+refs/heads/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME:refs/base" "+refs/merge-requests/$MR/head:refs/pr"
+      rc=0
+      BASE=refs/base HEAD=refs/pr DESCRIPTION=../description.md FRONTMATTER_AWK=../frontmatter.awk DIFF_FILE=../diff.txt bash ../pre_parser.sh \
+          2>&1 | tee ../out.txt || rc=$?
+      # The result as one comment, edited on each run. The proposal's text can be in it: inside a
+      # code block, without backticks, so it can't add links or mention anyone.
+      result=$(sed 's/\x1b\[[0-9;]*m//g' ../out.txt | grep -E '^(Error|Warning): ' | tr -d '`' || true)
+      if ((rc)); then head="❌ The proposal check failed"; else head="✅ The proposal check passed"; fi
+      # the description's differences from the file: its lines -, the file's +, at most 40 lines
+      diff=""
+      if [[ -s ../diff.txt ]]; then
+          diff=$(tr -d '`' < ../diff.txt | awk 'NR <= 40; NR == 41 { print "... (more in the log)" }')
+          diff=$(printf '\nThe description (-) and the file (+), below the front matter:\n\n```diff\n%s\n```\n' "$diff")
+      fi
+      comment "$MR" "$(printf '%s.\n\n```\n%s\n```\n%s\n[The check'"'"'s log](%s)\n' "$head" "${result:-No problems.}" "$diff" "$CI_JOB_URL")"
+      exit "$rc"
+
+# Merged (the merge commit pushed to the target branch): the comment becomes a link to the
+# proposal on that branch, and to edit it there. The file the maintainers later change
+# (milestones, payouts) keeps its name, so the link always opens its newest version.
+merged:
+  image: debian@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH && $CI_COMMIT_MESSAGE =~ /^Merge branch /
+  script:
+    - *setup
+    - |
+      branch=$CI_COMMIT_BRANCH
+      for MR in $(curl -fsS "${auth[@]}" "$api/repository/commits/$CI_COMMIT_SHA/merge_requests" \
+          | jq -r --arg c "$CI_COMMIT_SHA" '.[] | select(.state == "merged" and .merge_commit_sha == $c) | .iid'); do
+          file=$(curl -fsS "${auth[@]}" "$api/merge_requests/$MR/diffs?per_page=100" \
+              | jq -r '[.[] | select(.new_file) | .new_path | select(test("^[^/]+\\.md$"))][0] // empty')
+          [[ -n $file ]] || continue
+          path=$(jq -rn --arg f "$file" '$f | @uri')
+          comment "$MR" "$(printf '✅ Merged. The proposal on %s: [%s](%s/-/blob/%s/%s) · [edit it](%s/-/edit/%s/%s)\n\nThat link always opens its newest version: later changes (milestones, payouts) are made to this file.\n' \
+              "$branch" "$(tr -d '[]`' <<<"$file")" "$CI_PROJECT_URL" "$branch" "$path" "$CI_PROJECT_URL" "$branch" "$path")"
+      done
